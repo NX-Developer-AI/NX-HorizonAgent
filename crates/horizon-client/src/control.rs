@@ -135,9 +135,17 @@ fn random_token() -> String {
 fn write_private(path: &Path, text: &str) -> io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?.write_all(text.as_bytes())
+    #[cfg(target_os = "android")]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o660);
+    options.open(path)?.write_all(text.as_bytes())?;
+    #[cfg(target_os = "android")]
+    std::fs::set_permissions(
+        path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o660),
+    )?;
+    Ok(())
 }
 
 /// Constant-time comparison of the presented token.
