@@ -1,0 +1,10 @@
+{
+  "name": "nx-horizon",
+  "version": "1.0.0",
+  "description": "Play and drive NX Horizon (Horizon Android fork) from Claude Code through horizon-ctl MCP",
+  "author": {
+    "name": "NX Team"
+  },
+  "repository": "https://github.com/NX-Developer-AI/NX-HorizonAgent",
+  "license": "MIT"
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "horizon": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/nx-horizon-mcp",
+      "args": []
+    }
+  }
+}

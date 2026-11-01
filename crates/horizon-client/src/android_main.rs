@@ -232,6 +232,24 @@ fn init_logging() {
     }
 }
 
+fn configure_shared_agent_endpoint(home: &std::path::Path) {
+    if std::env::var_os("HORIZON_CONTROL").is_some() {
+        return;
+    }
+    let Some(package) = home.parent().and_then(|parent| parent.file_name()) else {
+        return;
+    };
+    let shared = std::path::Path::new("/storage/emulated/0/Android/obb").join(package);
+    match std::fs::create_dir_all(&shared) {
+        Ok(()) => {
+            let endpoint = shared.join("horizon-control.json");
+            log::info!("Horizon: agent endpoint {}", endpoint.display());
+            unsafe { std::env::set_var("HORIZON_CONTROL", endpoint) };
+        }
+        Err(error) => log::warn!("Horizon: shared agent folder {}: {error}", shared.display()),
+    }
+}
+
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     use winit::platform::android::activity::input::Axis;
@@ -248,6 +266,7 @@ fn android_main(app: AndroidApp) {
         log::error!("Android supplied no application data directory");
         return;
     };
+    configure_shared_agent_endpoint(&home);
     backend::initialize(home.clone());
     if let Err(error) = diagnostics::initialize(&home, serde_json::json!({})) {
         log::error!("Cannot initialize local diagnostics: {error}");

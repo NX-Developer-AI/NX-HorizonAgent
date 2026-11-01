@@ -1,0 +1,138 @@
+name: NX HorizonAgent build
+on:
+  push:
+    branches: [nx-agent]
+    tags: ['nx-v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: nx-agent-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  UPSTREAM_REPOSITORY: Vasysik/horizon-android
+  UPSTREAM_TAG: v0.7.6
+  APPLICATION_ID: dev.horizon.android.nx
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      HORIZON_TELEMETRY_URL: "off"
+      CARGO_TARGET_DIR: .local/ci-target
+      CARGO_BUILD_JOBS: "3"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk/2* /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Install Android toolchain
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "build-tools;35.0.0" > /dev/null
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> .local/ci-target"
+          key: android-arm64
+      - name: Build native library
+        run: |
+          python3 tools/android_build.py --abi arm64-v8a --public --profile fast --rust-only \
+            --sdk "$ANDROID_HOME" --java-home "$JAVA_HOME_17_X64" > build.log 2>&1 || { tail -n 200 build.log; exit 1; }
+      - name: Take engine data from the upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p upstream
+          gh release download "$UPSTREAM_TAG" -R "$UPSTREAM_REPOSITORY" -p 'Horizon-Android-*-arm64-v8a.apk' -D upstream
+          mkdir -p upstream/unpacked .local/android/gradle-assets .local/android/gradle-jni/arm64-v8a
+          unzip -q upstream/*.apk 'assets/*' -d upstream/unpacked
+          cp -r upstream/unpacked/assets/. .local/android/gradle-assets/
+          ls -la .local/android/gradle-assets
+      - name: Stage library
+        run: |
+          NDK_BIN="$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cp .local/ci-target/aarch64-linux-android/fast/libhorizon_android.so .local/android/gradle-jni/arm64-v8a/
+          "$NDK_BIN/llvm-strip" --strip-unneeded .local/android/gradle-jni/arm64-v8a/libhorizon_android.so
+      - name: Assemble APK
+        run: |
+          "$JAVA_HOME_17_X64/bin/keytool" -genkeypair -keystore .local/android/debug.keystore -storepass android -keypass android \
+            -alias androiddebugkey -keyalg RSA -validity 3650 -dname 'CN=Temporary' > /dev/null 2>&1
+          wget -q https://services.gradle.org/distributions/gradle-8.14-bin.zip -O gradle.zip
+          unzip -q gradle.zip -d gradle-dist
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          gradle-dist/gradle-8.14/bin/gradle --no-daemon -q -p packaging/android \
+            -Pabi=arm64-v8a -PminSdk=28 -PappId="$APPLICATION_ID" assembleRelease > gradle.log 2>&1 || { tail -n 200 gradle.log; exit 1; }
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.NX_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.NX_KEYSTORE_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > nx.keystore
+          TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          mkdir -p dist
+          "$TOOLS/zipalign" -f -p 4 .local/android/gradle-build/outputs/apk/release/HorizonAndroid-release.apk aligned.apk
+          "$TOOLS/apksigner" sign --ks nx.keystore --ks-key-alias nxhorizon --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEYSTORE_PASSWORD --out dist/NX-Horizon-arm64-v8a.apk aligned.apk
+          "$TOOLS/apksigner" verify dist/NX-Horizon-arm64-v8a.apk
+          rm nx.keystore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NX-Horizon-apk
+          path: dist/NX-Horizon-arm64-v8a.apk
+      - name: Write error report
+        if: failure()
+        run: |
+          { echo "Job: apk"; echo; for f in build.log gradle.log; do [ -f "$f" ] && { echo "== $f"; tail -n 400 "$f"; }; done; } > error.txt || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: error-apk
+          path: error.txt
+
+  horizon-ctl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      CARGO_TARGET_DIR: .local/ci-target
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+      AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-aarch64-linux-gnu g++-aarch64-linux-gnu > /dev/null
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> .local/ci-target"
+          key: ctl-aarch64
+      - name: Build horizon-ctl
+        run: |
+          cargo build -p horizon-client --bin horizon-ctl --no-default-features --profile fast \
+            --target aarch64-unknown-linux-gnu > build.log 2>&1 || { tail -n 200 build.log; exit 1; }
+          mkdir -p dist
+          cp .local/ci-target/aarch64-unknown-linux-gnu/fast/horizon-ctl dist/horizon-ctl-linux-aarch64
+          aarch64-linux-gnu-strip dist/horizon-ctl-linux-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-ctl-linux-aarch64
+          path: dist/horizon-ctl-linux-aarch64
+      - name: Write error report
+        if: failure()
+        run: |
+          { echo "Job: horizon-ctl"; echo; [ -f build.log ] && tail -n 400 build.log; } > error.txt || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: error-horizon-ctl
+          path: error.txt

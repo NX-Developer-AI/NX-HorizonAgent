@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository="${NX_HORIZON_REPOSITORY:-NX-Developer-AI/NX-HorizonAgent}"
+package="${NX_HORIZON_PACKAGE:-dev.horizon.android.nx}"
+endpoint="${NX_HORIZON_ENDPOINT:-/storage/emulated/0/Android/obb/${package}/horizon-control.json}"
+install_directory="${NX_HORIZON_HOME:-${HOME}/.local/share/nx-horizon}"
+binary="${NX_HORIZON_CTL:-${install_directory}/horizon-ctl}"
+
+log() {
+  printf 'nx-horizon: %s\n' "$*" >&2
+}
+
+download_binary() {
+  mkdir -p "${install_directory}"
+  local temporary
+  temporary="$(mktemp -d)"
+  if gh release download --repo "${repository}" --pattern 'horizon-ctl-linux-aarch64' --dir "${temporary}" >/dev/null 2>&1 \
+    || gh run download --repo "${repository}" --name 'horizon-ctl-linux-aarch64' --dir "${temporary}" >/dev/null 2>&1; then
+    mv "${temporary}/horizon-ctl-linux-aarch64" "${binary}"
+    chmod +x "${binary}"
+  fi
+  rm -rf "${temporary}"
+}
+
+if [ ! -x "${binary}" ]; then
+  log "horizon-ctl not found, downloading from ${repository}"
+  download_binary
+fi
+
+if [ ! -x "${binary}" ]; then
+  log "horizon-ctl is missing: put it at ${binary} or set NX_HORIZON_CTL"
+  exit 1
+fi
+
+if [ ! -f "${endpoint}" ]; then
+  log "endpoint ${endpoint} not found yet: open NX Horizon and turn on Horizon Settings > AI Agent > Agent Control"
+fi
+
+exec "${binary}" --socket "${endpoint}" mcp

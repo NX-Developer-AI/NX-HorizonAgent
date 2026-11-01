@@ -1,0 +1,17 @@
+{
+  "name": "nx-team",
+  "owner": {
+    "name": "NX Team"
+  },
+  "metadata": {
+    "description": "NX Team plugins for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "nx-horizon",
+      "source": "./nx-horizon",
+      "description": "Play and drive NX Horizon (Horizon Android fork) from Claude Code through horizon-ctl MCP",
+      "version": "1.0.0"
+    }
+  ]
+}
