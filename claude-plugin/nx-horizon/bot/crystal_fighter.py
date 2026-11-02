@@ -12,6 +12,7 @@ PREFERRED_RANGE = (1.3, 4.0)
 LEAD_SECONDS = 0.2
 LEARNED_WEIGHT = 0.8
 SWORD_COOLDOWN = 0.65
+MAX_CRYSTAL_DAMAGE = 20.0
 EXISTING_OBSIDIAN_BONUS = 1.2
 
 
@@ -289,7 +290,7 @@ class CrystalFighter:
         bucket, spot, health_before, target_id = self.pending_crystal
         self.pending_crystal = None
         health_now = target.get("health", 0.0) if target and target["id"] == target_id else 0.0
-        damage = max(0.0, (health_before or 0.0) - (health_now or 0.0))
+        damage = min(MAX_CRYSTAL_DAMAGE, max(0.0, (health_before or 0.0) - (health_now or 0.0)))
         self.memory.record_placement(bucket, damage)
         self.damage_dealt += damage
         self.failed_spots[spot] = 0 if damage > 0.05 else self.failed_spots.get(spot, 0) + 1
