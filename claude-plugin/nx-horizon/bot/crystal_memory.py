@@ -10,8 +10,11 @@ PARAMETER_OPTIONS = {
     "safety_margin": [0.3, 0.45, 0.6],
     "place_to_break_delay": [0.1, 0.15, 0.2],
     "eat_health": [8.0, 10.0, 12.0],
+    "melee_trigger": [2.2, 2.8, 3.2],
+    "knockback_lead": [0.2, 0.35, 0.5],
 }
-DEFAULT_PARAMETERS = {"safety_margin": 0.45, "place_to_break_delay": 0.15, "eat_health": 10.0}
+DEFAULT_PARAMETERS = {"safety_margin": 0.45, "place_to_break_delay": 0.15, "eat_health": 10.0,
+                      "melee_trigger": 2.8, "knockback_lead": 0.35}
 EXPLORATION_RATE = 0.25
 PRIOR_DAMAGE = 1.0
 PRIOR_WEIGHT = 2.0

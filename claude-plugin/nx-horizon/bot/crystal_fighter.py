@@ -6,11 +6,13 @@ from crystal_memory import CrystalMemory
 from horizon_client import Horizon
 
 REACH = 4.3
-CYCLE_SECONDS = 0.5
+CYCLE_SECONDS = 0.35
 EAT_SECONDS = 1.65
 PREFERRED_RANGE = (1.3, 4.0)
 LEAD_SECONDS = 0.2
 LEARNED_WEIGHT = 0.8
+SWORD_COOLDOWN = 0.65
+EXISTING_OBSIDIAN_BONUS = 1.2
 
 
 class CrystalFighter:
@@ -34,6 +36,10 @@ class CrystalFighter:
         self.damage_taken = 0.0
         self.totems_popped = 0
         self.last_eat = 0.0
+        self.last_hit = 0.0
+        self.branch_time = {}
+        self.own_obsidian = set()
+        self.reused = 0
         self.crystals = 0
 
     def note(self, text):
@@ -125,7 +131,10 @@ class CrystalFighter:
                     bucket = self.memory.placement_bucket(to_target, side, target_moving)
                     learned = self.memory.expected_damage(bucket)
                     to_me = math.dist(crystal_center, eye)
-                    score = to_target - 0.25 * to_me - LEARNED_WEIGHT * learned - (0.3 if offset_y == 0 else 0.0)
+                    existing = self.block_at(*spot) in ("minecraft:obsidian", "minecraft:bedrock")
+                    reuse_bonus = EXISTING_OBSIDIAN_BONUS if existing else 0.0
+                    score = (to_target - 0.25 * to_me - LEARNED_WEIGHT * learned
+                             - (0.3 if offset_y == 0 else 0.0) - reuse_bonus)
                     candidates.append((score, spot, bucket))
         candidates.sort()
         return [(spot, bucket) for _, spot, bucket in candidates]
@@ -199,6 +208,69 @@ class CrystalFighter:
                 return True
         return False
 
+    def place_and_pop(self, predicted, eye, bucket_side=None, moving=False):
+        self.prefetch_blocks(predicted)
+        for spot, bucket in self.candidate_spots(predicted, eye, moving):
+            status = self.usable(spot)
+            if not status:
+                continue
+            if status == "needs_obsidian":
+                reply = self.call("place", *spot, "--item", "obsidian")
+                self.current_item = "obsidian"
+                self.aimed_spot = None
+                if not reply.get("ok"):
+                    self.failed_spots[spot] = 2
+                    continue
+                self.own_obsidian.add(spot)
+            if self.current_item != "end_crystal":
+                self.call("select", "end_crystal")
+                self.current_item = "end_crystal"
+            if self.aimed_spot != spot:
+                self.call("look-at", spot[0] + 0.5, spot[1] + 1.0, spot[2] + 0.5)
+                self.aimed_spot = spot
+            self.call("mouse", "right", "click")
+            time.sleep(self.parameters["place_to_break_delay"])
+            self.call("mouse", "left", "click")
+            self.crystals += 1
+            if bucket_side:
+                distance_part = bucket.split("|")[0]
+                bucket = f"{distance_part}|{bucket_side}|{'moving' if moving else 'still'}"
+            return spot, bucket
+        return None, None
+
+    def knockback_combo(self, target):
+        if self.current_item != "sword":
+            self.call("select", "netherite_sword")
+            self.current_item = "sword"
+        self.call("look-at", "entity", target["id"])
+        self.call("move", "forward", 0.12, "--sprint")
+        hit = self.call("attack", target["id"])
+        self.last_hit = time.time()
+        self.aimed_spot = None
+        health_after_hit = hit.get("health", target.get("health"))
+        if hit.get("health_before") is not None and health_after_hit is not None:
+            self.damage_dealt += max(0.0, hit["health_before"] - health_after_hit)
+        if not hit.get("hit"):
+            self.note("knockback swing missed")
+            return
+        first_position = target["pos"]
+        time.sleep(0.12)
+        flying = self.nearest_target()
+        if not flying:
+            return
+        elapsed = max(0.05, time.time() - self.last_hit)
+        velocity = [(flying["pos"][axis] - first_position[axis]) / elapsed for axis in range(3)]
+        lead = self.parameters["knockback_lead"]
+        predicted = [flying["pos"][0] + velocity[0] * lead, first_position[1], flying["pos"][2] + velocity[2] * lead]
+        player = self.call("state").get("player") or {}
+        spot, bucket = self.place_and_pop(predicted, player.get("eye", first_position), "knock", True)
+        if spot:
+            self.pending_crystal = (bucket, spot, flying.get("health"), flying["id"])
+            self.note(f"knockback combo: hit {hit.get('health_before', 0):.1f}->{health_after_hit or 0:.1f}, "
+                      f"flew {math.hypot(velocity[0], velocity[2]):.1f} b/s, crystal at {spot}")
+        else:
+            self.note("knockback combo: no crystal spot near landing point")
+
     def settle_pending(self, target):
         if not self.pending_crystal:
             return
@@ -244,10 +316,19 @@ class CrystalFighter:
             horizontal = math.dist((eye[0], eye[2]), (target["pos"][0], target["pos"][2]))
             if horizontal > PREFERRED_RANGE[1]:
                 self.call("look-at", "entity", target["id"])
+                self.branch_time["approach"] = self.branch_time.get("approach", 0) + 1
                 self.call("move", "forward", 0.25, "--sprint")
                 self.aimed_spot = None
                 continue
+            target_vulnerable = (target.get("hurt_time") or 0) <= 1
+            if (horizontal <= self.parameters["melee_trigger"] and target_vulnerable
+                    and time.time() - self.last_hit >= SWORD_COOLDOWN):
+                self.branch_time["combo"] = self.branch_time.get("combo", 0) + 1
+                self.knockback_combo(target)
+                time.sleep(max(0.0, CYCLE_SECONDS - (time.time() - cycle_start)))
+                continue
             if horizontal < PREFERRED_RANGE[0]:
+                self.branch_time["escape"] = self.branch_time.get("escape", 0) + 1
                 self.escape_toward_center(target["pos"], 0.3)
                 continue
             now = time.time()
@@ -269,10 +350,15 @@ class CrystalFighter:
                     break
             if not chosen:
                 self.call("look-at", "entity", target["id"])
+                self.branch_time["no_spot"] = self.branch_time.get("no_spot", 0) + 1
                 self.call("move", "left" if cycle % 2 else "right", 0.25)
                 self.aimed_spot = None
                 continue
             spot, bucket, status = chosen
+            if status == "ready":
+                self.reused += 1
+            if not target_vulnerable:
+                time.sleep(0.05 * max(0, (target.get("hurt_time") or 0) - 1))
             if status == "needs_obsidian":
                 reply = self.call("place", *spot, "--item", "obsidian")
                 self.current_item = "obsidian"
@@ -280,6 +366,7 @@ class CrystalFighter:
                 if not reply.get("ok"):
                     self.failed_spots[spot] = 2
                     continue
+                self.own_obsidian.add(spot)
             if self.current_item != "end_crystal":
                 self.call("select", "end_crystal")
                 self.current_item = "end_crystal"
@@ -301,6 +388,7 @@ class CrystalFighter:
         self.memory.save()
         events = [line for line in self.log if " crystal " not in line]
         print("\n".join(events + [line for line in self.log if " crystal " in line][-4:]))
+        print(f"branches: {self.branch_time} obsidian placed {len(self.own_obsidian)}, reused {self.reused}")
         print(f"result: {'WIN' if won else 'DIED' if died else 'TIMEOUT'} crystals={self.crystals} "
               f"dealt={self.damage_dealt:.1f} taken={self.damage_taken:.1f} totems={self.totems_popped} "
               f"time={seconds:.1f}s score={score:.1f}")
