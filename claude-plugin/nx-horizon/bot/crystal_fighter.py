@@ -13,6 +13,9 @@ LEAD_SECONDS = 0.2
 LEARNED_WEIGHT = 0.8
 SWORD_COOLDOWN = 0.65
 MAX_CRYSTAL_DAMAGE = 20.0
+SAFE_EAT_DISTANCE = 6.0
+ESCAPE_SECONDS = 2.5
+DESPERATE_HEALTH = 5.0
 EXISTING_OBSIDIAN_BONUS = 1.2
 
 
@@ -41,6 +44,9 @@ class CrystalFighter:
         self.branch_time = {}
         self.target_killed = False
         self.last_damage_seen = 0.0
+        self.melee_mode = False
+        self.melee_hits = 0
+        self.counts = {}
         self.own_obsidian = set()
         self.reused = 0
         self.crystals = 0
@@ -200,6 +206,7 @@ class CrystalFighter:
 
     def ensure_offhand_totem(self):
         counts, offhand = self.inventory()
+        self.counts = counts
         if offhand == "minecraft:totem_of_undying" or counts.get("minecraft:totem_of_undying", 0) == 0:
             return False
         started = time.time()
@@ -233,9 +240,28 @@ class CrystalFighter:
         self.call("move", "forward", seconds, "--sprint")
         self.aimed_spot = None
 
-    def eat_golden_apple(self, threat_position):
+    def distance_to(self, position):
+        me = (self.call("state").get("player") or {}).get("position")
+        return math.hypot(me[0] - position[0], me[2] - position[2]) if me else 0.0
+
+    def eat_golden_apple(self, threat_position, health):
         if threat_position:
-            self.escape_toward_center(threat_position, 0.6)
+            escape_started = time.time()
+            safe = False
+            while time.time() - escape_started < ESCAPE_SECONDS:
+                threat = self.nearest_target()
+                if not threat:
+                    safe = True
+                    break
+                if self.distance_to(threat["pos"]) >= SAFE_EAT_DISTANCE:
+                    safe = True
+                    break
+                self.escape_toward_center(threat["pos"], 0.4)
+            if not safe and health > DESPERATE_HEALTH:
+                self.note("could not get away to eat: keep fighting")
+                return False
+            if not safe:
+                self.note("cornered and low: eating anyway")
         counts, _ = self.inventory()
         for item in ("enchanted_golden_apple", "golden_apple"):
             if counts.get(f"minecraft:{item}", 0) > 0:
@@ -322,6 +348,33 @@ class CrystalFighter:
         else:
             self.note("knockback combo: no crystal spot near landing point")
 
+    def melee(self, target, horizontal, cycle):
+        if self.current_item != "sword":
+            self.call("select", "netherite_sword")
+            self.current_item = "sword"
+            self.aimed_spot = None
+        self.face(target)
+        if horizontal > 3.0:
+            self.call("move", "forward", 0.2, "--sprint")
+            return
+        if target.get("hurt_time") is None:
+            vulnerable = time.time() - self.last_damage_seen >= 0.5
+        else:
+            vulnerable = (target.get("hurt_time") or 0) <= 1
+        if vulnerable and time.time() - self.last_hit >= SWORD_COOLDOWN:
+            self.call("move", "forward", 0.08, "--sprint")
+            self.face(target)
+            hit = self.strike(target)
+            self.last_hit = time.time()
+            if hit.get("hit"):
+                self.last_damage_seen = time.time()
+                self.damage_dealt += max(0.0, (hit.get("health_before") or 0) - (hit.get("health") or 0))
+                self.melee_hits += 1
+            if hit.get("alive") is False:
+                self.target_killed = True
+            return
+        self.call("move", "left" if cycle % 4 < 2 else "right", 0.15)
+
     def settle_pending(self, target):
         if not self.pending_crystal:
             return
@@ -361,12 +414,20 @@ class CrystalFighter:
                 self.note("target dead")
                 break
             if health <= self.parameters["eat_health"] and time.time() - self.last_eat > 3:
-                if self.eat_golden_apple(target["pos"]):
+                if self.eat_golden_apple(target["pos"], health):
                     self.last_eat = time.time()
                     last_health = None
                     continue
+                self.last_eat = time.time() - 1.5
             eye = player["eye"]
             horizontal = math.dist((eye[0], eye[2]), (target["pos"][0], target["pos"][2]))
+            if (self.counts.get("minecraft:end_crystal", 0) == 0
+                    or (self.counts.get("minecraft:obsidian", 0) == 0 and not self.own_obsidian)):
+                if not self.melee_mode:
+                    self.melee_mode = True
+                    self.note("out of crystals or obsidian: switching to the sword")
+                self.melee(target, horizontal, cycle)
+                continue
             if horizontal > PREFERRED_RANGE[1]:
                 self.face(target)
                 self.branch_time["approach"] = self.branch_time.get("approach", 0) + 1
@@ -453,6 +514,7 @@ class CrystalFighter:
         self.memory.save()
         events = [line for line in self.log if " crystal " not in line]
         print("\n".join(events + [line for line in self.log if " crystal " in line][-4:]))
+        print(f"melee hits: {self.melee_hits}")
         print(f"branches: {self.branch_time} obsidian placed {len(self.own_obsidian)}, reused {self.reused}")
         print(f"result: {'WIN' if won else 'DIED' if died else 'TIMEOUT'} crystals={self.crystals} "
               f"dealt={self.damage_dealt:.1f} taken={self.damage_taken:.1f} totems={self.totems_popped} "
