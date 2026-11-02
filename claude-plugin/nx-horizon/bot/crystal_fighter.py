@@ -40,6 +40,7 @@ class CrystalFighter:
         self.last_hit = 0.0
         self.branch_time = {}
         self.target_killed = False
+        self.last_damage_seen = 0.0
         self.own_obsidian = set()
         self.reused = 0
         self.crystals = 0
@@ -154,8 +155,44 @@ class CrystalFighter:
         return None
 
     def nearest_target(self):
-        targets = self.call("entities", 16, self.target_type).get("entities", [])
-        return targets[0] if targets else None
+        if self.target_type != "player":
+            targets = self.call("entities", 16, self.target_type).get("entities", [])
+            return targets[0] if targets else None
+        status = self.call("lan", "status")
+        host = status.get("host")
+        me = (self.call("state").get("player") or {}).get("position")
+        players = []
+        for guest in status.get("guests", []):
+            if guest.get("name") == host or not guest.get("loaded"):
+                continue
+            if guest.get("health", 0) <= 0 or guest.get("game_mode") not in (0, 2):
+                continue
+            distance = math.dist(me, guest["position"]) if me else 0.0
+            if distance > 24:
+                continue
+            players.append({"id": guest["name"], "pos": guest["position"], "distance": distance,
+                            "health": guest.get("health", 0.0) + guest.get("absorption", 0.0),
+                            "hurt_time": None, "kind": "player"})
+        players.sort(key=lambda entry: entry["distance"])
+        return players[0] if players else None
+
+    def face(self, target):
+        if target.get("kind") == "player":
+            position = target["pos"]
+            self.call("look-at", position[0], position[1] + 1.2, position[2])
+        else:
+            self.call("look-at", "entity", target["id"])
+
+    def strike(self, target):
+        if target.get("kind") != "player":
+            return self.call("attack", target["id"])
+        before = target.get("health")
+        self.call("mouse", "left", "click")
+        time.sleep(0.08)
+        after_target = self.nearest_target()
+        after = after_target.get("health") if after_target else 0.0
+        return {"hit": after is not None and before is not None and after < before, "health_before": before,
+                "health": after, "alive": bool(after_target) and (after or 0) > 0}
 
     def inventory(self):
         inventory = self.call("inventory")
@@ -211,8 +248,8 @@ class CrystalFighter:
         return False
 
     def target_alive(self, target_id):
-        return any(entity["id"] == target_id and (entity.get("health") or 0) > 0
-                   for entity in self.call("entities", 16, self.target_type).get("entities", []))
+        target = self.nearest_target()
+        return bool(target) and target["id"] == target_id and (target.get("health") or 0) > 0
 
     def place_and_pop(self, predicted, eye, target_id, bucket_side=None, moving=False):
         self.prefetch_blocks(predicted)
@@ -251,9 +288,10 @@ class CrystalFighter:
         if self.current_item != "sword":
             self.call("select", "netherite_sword")
             self.current_item = "sword"
-        self.call("look-at", "entity", target["id"])
+        self.face(target)
         self.call("move", "forward", 0.12, "--sprint")
-        hit = self.call("attack", target["id"])
+        self.face(target)
+        hit = self.strike(target)
         self.last_hit = time.time()
         self.aimed_spot = None
         health_after_hit = hit.get("health", target.get("health"))
@@ -293,6 +331,8 @@ class CrystalFighter:
         damage = min(MAX_CRYSTAL_DAMAGE, max(0.0, (health_before or 0.0) - (health_now or 0.0)))
         self.memory.record_placement(bucket, damage)
         self.damage_dealt += damage
+        if damage > 0.05:
+            self.last_damage_seen = time.time()
         self.failed_spots[spot] = 0 if damage > 0.05 else self.failed_spots.get(spot, 0) + 1
 
     def run(self):
@@ -328,12 +368,15 @@ class CrystalFighter:
             eye = player["eye"]
             horizontal = math.dist((eye[0], eye[2]), (target["pos"][0], target["pos"][2]))
             if horizontal > PREFERRED_RANGE[1]:
-                self.call("look-at", "entity", target["id"])
+                self.face(target)
                 self.branch_time["approach"] = self.branch_time.get("approach", 0) + 1
                 self.call("move", "forward", 0.25, "--sprint")
                 self.aimed_spot = None
                 continue
-            target_vulnerable = (target.get("hurt_time") or 0) <= 1
+            if target.get("hurt_time") is None:
+                target_vulnerable = time.time() - self.last_damage_seen >= 0.5
+            else:
+                target_vulnerable = (target.get("hurt_time") or 0) <= 1
             if (horizontal <= self.parameters["melee_trigger"] and target_vulnerable
                     and time.time() - self.last_hit >= SWORD_COOLDOWN):
                 self.branch_time["combo"] = self.branch_time.get("combo", 0) + 1
@@ -366,7 +409,7 @@ class CrystalFighter:
                     chosen = (spot, bucket, status)
                     break
             if not chosen:
-                self.call("look-at", "entity", target["id"])
+                self.face(target)
                 self.branch_time["no_spot"] = self.branch_time.get("no_spot", 0) + 1
                 self.call("move", "left" if cycle % 2 else "right", 0.25)
                 self.aimed_spot = None
