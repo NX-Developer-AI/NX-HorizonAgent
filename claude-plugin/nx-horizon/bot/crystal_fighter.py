@@ -1,5 +1,6 @@
 import argparse
 import math
+import re
 import time
 
 from crystal_memory import CrystalMemory
@@ -16,6 +17,8 @@ MAX_CRYSTAL_DAMAGE = 20.0
 SAFE_EAT_DISTANCE = 6.0
 ESCAPE_SECONDS = 2.5
 DESPERATE_HEALTH = 5.0
+ENEMY_CRYSTAL_DANGER = 4.5
+MAX_DODGES_PER_CRYSTAL = 3
 EXISTING_OBSIDIAN_BONUS = 1.2
 
 
@@ -48,6 +51,7 @@ class CrystalFighter:
         self.melee_hits = 0
         self.counts = {}
         self.own_obsidian = set()
+        self.crystal_dodges = {}
         self.reused = 0
         self.crystals = 0
 
@@ -229,18 +233,52 @@ class CrystalFighter:
         self.aimed_spot = None
         return True
 
-    def escape_toward_center(self, threat_position, seconds):
+    def escape_toward_center(self, threat_position, seconds, center_weight=0.9):
         player = self.call("state").get("player") or {}
         position = player.get("position", [self.arena_center[0], 0, self.arena_center[1]])
         away = (position[0] - threat_position[0], position[2] - threat_position[2])
         center = (self.arena_center[0] - position[0], self.arena_center[1] - position[2])
         away_length = math.hypot(*away) or 1.0
         center_length = math.hypot(*center) or 1.0
-        direction = (away[0] / away_length + 0.9 * center[0] / center_length,
-                     away[1] / away_length + 0.9 * center[1] / center_length)
+        direction = (away[0] / away_length + center_weight * center[0] / center_length,
+                     away[1] / away_length + center_weight * center[1] / center_length)
         self.call("look-at", position[0] + direction[0] * 5, position[1] + 1.6, position[2] + direction[1] * 5)
         self.call("move", "forward", seconds, "--sprint")
         self.aimed_spot = None
+
+    def nearby_crystal(self):
+        reply = self.call("command", "data get entity @e[type=end_crystal,distance=..7,sort=nearest,limit=1] Pos")
+        for line in reply.get("chat", []):
+            match = re.search(r"\[(-?[\d.]+)d, (-?[\d.]+)d, (-?[\d.]+)d\]", line)
+            if match:
+                return tuple(float(value) for value in match.groups())
+        return None
+
+    def handle_enemy_crystal(self, player, target):
+        crystal = self.nearby_crystal()
+        if not crystal:
+            return False
+        me = player.get("position")
+        eye = player.get("eye")
+        to_me = math.dist(crystal, me)
+        to_target = math.dist(crystal, target["pos"])
+        aim = (crystal[0], crystal[1] + 1.0, crystal[2])
+        if math.dist(aim, eye) <= REACH and to_target + 1.0 < to_me:
+            self.call("look-at", *aim)
+            self.call("mouse", "left", "click")
+            self.aimed_spot = None
+            self.branch_time["break_enemy"] = self.branch_time.get("break_enemy", 0) + 1
+            self.note(f"broke a crystal next to the target ({to_target:.1f} from them, {to_me:.1f} from me)")
+            return True
+        key = tuple(round(value) for value in crystal)
+        dodges = self.crystal_dodges.get(key, 0)
+        if to_me <= ENEMY_CRYSTAL_DANGER and dodges < MAX_DODGES_PER_CRYSTAL:
+            self.crystal_dodges[key] = dodges + 1
+            self.branch_time["dodge"] = self.branch_time.get("dodge", 0) + 1
+            self.note(f"enemy crystal {to_me:.1f} blocks away: moving out of the blast")
+            self.escape_toward_center(crystal, 0.35, 0.3)
+            return True
+        return False
 
     def distance_to(self, position):
         me = (self.call("state").get("player") or {}).get("position")
@@ -418,6 +456,8 @@ class CrystalFighter:
                 won = True
                 self.note("target dead")
                 break
+            if self.handle_enemy_crystal(player, target):
+                continue
             if health <= self.parameters["eat_health"] and time.time() - self.last_eat > 3:
                 if self.eat_golden_apple(target["pos"], health):
                     self.last_eat = time.time()
