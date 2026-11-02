@@ -38,6 +38,7 @@ class CrystalFighter:
         self.last_eat = 0.0
         self.last_hit = 0.0
         self.branch_time = {}
+        self.target_killed = False
         self.own_obsidian = set()
         self.reused = 0
         self.crystals = 0
@@ -208,7 +209,11 @@ class CrystalFighter:
                 return True
         return False
 
-    def place_and_pop(self, predicted, eye, bucket_side=None, moving=False):
+    def target_alive(self, target_id):
+        return any(entity["id"] == target_id and (entity.get("health") or 0) > 0
+                   for entity in self.call("entities", 16, self.target_type).get("entities", []))
+
+    def place_and_pop(self, predicted, eye, target_id, bucket_side=None, moving=False):
         self.prefetch_blocks(predicted)
         for spot, bucket in self.candidate_spots(predicted, eye, moving):
             status = self.usable(spot)
@@ -228,6 +233,9 @@ class CrystalFighter:
             if self.aimed_spot != spot:
                 self.call("look-at", spot[0] + 0.5, spot[1] + 1.0, spot[2] + 0.5)
                 self.aimed_spot = spot
+            if not self.target_alive(target_id):
+                self.target_killed = True
+                return None, None
             self.call("mouse", "right", "click")
             time.sleep(self.parameters["place_to_break_delay"])
             self.call("mouse", "left", "click")
@@ -253,6 +261,10 @@ class CrystalFighter:
         if not hit.get("hit"):
             self.note("knockback swing missed")
             return
+        if hit.get("alive") is False:
+            self.target_killed = True
+            self.note("target killed by the sword hit: no crystal needed")
+            return
         first_position = target["pos"]
         time.sleep(0.12)
         flying = self.nearest_target()
@@ -263,7 +275,7 @@ class CrystalFighter:
         lead = self.parameters["knockback_lead"]
         predicted = [flying["pos"][0] + velocity[0] * lead, first_position[1], flying["pos"][2] + velocity[2] * lead]
         player = self.call("state").get("player") or {}
-        spot, bucket = self.place_and_pop(predicted, player.get("eye", first_position), "knock", True)
+        spot, bucket = self.place_and_pop(predicted, player.get("eye", first_position), flying["id"], "knock", True)
         if spot:
             self.pending_crystal = (bucket, spot, flying.get("health"), flying["id"])
             self.note(f"knockback combo: hit {hit.get('health_before', 0):.1f}->{health_after_hit or 0:.1f}, "
@@ -325,6 +337,10 @@ class CrystalFighter:
                     and time.time() - self.last_hit >= SWORD_COOLDOWN):
                 self.branch_time["combo"] = self.branch_time.get("combo", 0) + 1
                 self.knockback_combo(target)
+                if self.target_killed:
+                    won = True
+                    self.note("target dead")
+                    break
                 time.sleep(max(0.0, CYCLE_SECONDS - (time.time() - cycle_start)))
                 continue
             if horizontal < PREFERRED_RANGE[0]:
@@ -373,6 +389,11 @@ class CrystalFighter:
             if self.aimed_spot != spot:
                 self.call("look-at", spot[0] + 0.5, spot[1] + 1.0, spot[2] + 0.5)
                 self.aimed_spot = spot
+            if not self.target_alive(target["id"]):
+                self.target_killed = True
+                won = True
+                self.note("target died before the crystal: skipped it")
+                break
             self.call("mouse", "right", "click")
             time.sleep(self.parameters["place_to_break_delay"])
             self.call("mouse", "left", "click")
