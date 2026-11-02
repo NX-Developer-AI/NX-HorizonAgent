@@ -9,13 +9,13 @@ from horizon_client import Horizon
 ARMOR_PIECES = {"head": "helmet", "chest": "chestplate", "legs": "leggings", "feet": "boots"}
 
 
-def target_equipment():
-    pieces = [f'{slot}:{{id:"minecraft:netherite_{name}",count:1,components:{{"minecraft:enchantments":{{"minecraft:protection":4}}}}}}'
+def target_equipment(enchantment):
+    pieces = [f'{slot}:{{id:"minecraft:netherite_{name}",count:1,components:{{"minecraft:enchantments":{{"minecraft:{enchantment}":4}}}}}}'
               for slot, name in ARMOR_PIECES.items()]
     return ",".join(pieces)
 
 
-def reset_round(horizon, center, moving):
+def reset_round(horizon, center, moving, enchantment):
     x, y, z = center
     commands = [
         "time set day", "gamemode survival", "difficulty normal", "kill @e[type=!player]",
@@ -30,7 +30,7 @@ def reset_round(horizon, center, moving):
         "give @s totem_of_undying 6",
         f"tp @s {x - 6 + 0.5} {y} {z + 0.5} -90 10",
         f"summon minecraft:zombie {x + 4 + 0.5} {y} {z + random.choice([-2, 0, 2]) + 0.5} "
-        f"{{PersistenceRequired:1b,{'' if moving else 'NoAI:1b,'}equipment:{{{target_equipment()}}}}}",
+        f"{{PersistenceRequired:1b,{'' if moving else 'NoAI:1b,'}equipment:{{{target_equipment(enchantment)}}}}}",
     ]
     for command in commands:
         reply = horizon("command", command)
@@ -53,12 +53,13 @@ def main():
     parser.add_argument("--still", action="store_true", help="target does not move")
     parser.add_argument("--pressure", type=float, default=0.0, help="simulated enemy crystal damage per hit (0 = off)")
     parser.add_argument("--pressure-interval", type=float, default=2.5)
+    parser.add_argument("--target-enchantment", default="protection", help="protection or blast_protection")
     parser.add_argument("--pressure-type", default="explosion", help="damage type, e.g. explosion or generic")
     arguments = parser.parse_args()
     horizon = Horizon()
     for round_number in range(1, arguments.rounds + 1):
         print(f"\n=== round {round_number}/{arguments.rounds} ===")
-        reset_round(horizon, arguments.center, not arguments.still)
+        reset_round(horizon, arguments.center, not arguments.still, arguments.target_enchantment)
         stop = threading.Event()
         worker = None
         if arguments.pressure > 0:
