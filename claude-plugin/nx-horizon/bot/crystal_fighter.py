@@ -168,6 +168,7 @@ class CrystalFighter:
         host = status.get("host")
         me = (self.call("state").get("player") or {}).get("position")
         players = []
+        self.target_far = False
         for guest in status.get("guests", []):
             if guest.get("name") == host or not guest.get("loaded"):
                 continue
@@ -175,6 +176,7 @@ class CrystalFighter:
                 continue
             distance = math.dist(me, guest["position"]) if me else 0.0
             if distance > 24:
+                self.target_far = True
                 continue
             players.append({"id": guest["name"], "pos": guest["position"], "distance": distance,
                             "health": guest.get("health", 0.0) + guest.get("absorption", 0.0),
@@ -410,6 +412,9 @@ class CrystalFighter:
             target = self.nearest_target()
             self.settle_pending(target)
             if not target:
+                if getattr(self, "target_far", False):
+                    self.note("target left the arena alive: stopping without a result")
+                    break
                 won = True
                 self.note("target dead")
                 break
