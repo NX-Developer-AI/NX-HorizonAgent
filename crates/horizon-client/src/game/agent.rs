@@ -674,10 +674,21 @@ impl Game<'_> {
                     "level": m.extra.variant3,
                 });
             }
+            if let Some(name) = self.remote_player_name(m.id) {
+                v["kind"] = json!("player");
+                v["name"] = json!(name);
+            }
             push(
                 [m.position.x, m.position.y, m.position.z],
                 m.kind.id.as_ref(),
                 v,
+            );
+        }
+        for crystal in &self.crystals {
+            push(
+                [crystal.position.x, crystal.position.y, crystal.position.z],
+                "minecraft:end_crystal",
+                json!({ "id": crystal.id, "kind": "crystal" }),
             );
         }
         for item in &self.dropped {

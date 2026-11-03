@@ -23,7 +23,9 @@ EXISTING_OBSIDIAN_BONUS = 1.2
 
 
 class CrystalFighter:
-    def __init__(self, target_type, time_limit, arena_center):
+    def __init__(self, target_type, time_limit, arena_center, opponent=None):
+        self.opponent = opponent
+        self.crystals_listed = False
         self.horizon = Horizon()
         self.memory = CrystalMemory()
         self.parameters = self.memory.choose_parameters()
@@ -168,13 +170,29 @@ class CrystalFighter:
         if self.target_type != "player":
             targets = self.call("entities", 16, self.target_type).get("entities", [])
             return targets[0] if targets else None
+        players = []
+        self.target_far = False
+        for entity in self.call("entities", 48, "player").get("entities", []):
+            if entity.get("kind") != "player" or (self.opponent and entity.get("name") != self.opponent):
+                continue
+            if (entity.get("health") or 0) <= 0:
+                continue
+            if entity["distance"] > 24:
+                self.target_far = True
+                continue
+            players.append({"id": entity.get("name"), "entity_id": entity.get("id"), "pos": entity["pos"],
+                            "distance": entity["distance"], "health": entity.get("health"),
+                            "hurt_time": entity.get("hurt_time"), "kind": "player"})
+        if players or self.target_far:
+            players.sort(key=lambda entry: entry["distance"])
+            return players[0] if players else None
         status = self.call("lan", "status")
         host = status.get("host")
         me = (self.call("state").get("player") or {}).get("position")
-        players = []
-        self.target_far = False
         for guest in status.get("guests", []):
             if guest.get("name") == host or not guest.get("loaded"):
+                continue
+            if self.opponent and guest.get("name") != self.opponent:
                 continue
             if guest.get("health", 0) <= 0 or guest.get("game_mode") not in (0, 2):
                 continue
@@ -247,6 +265,12 @@ class CrystalFighter:
         self.aimed_spot = None
 
     def nearby_crystal(self):
+        listed = self.call("entities", 7, "end_crystal").get("entities", [])
+        if listed:
+            self.crystals_listed = True
+            return tuple(listed[0]["pos"])
+        if self.crystals_listed or self.target_type == "player" and not self.call("lan", "status").get("guests"):
+            return None
         reply = self.call("command", "data get entity @e[type=end_crystal,distance=..7,sort=nearest,limit=1] Pos")
         for line in reply.get("chat", []):
             match = re.search(r"\[(-?[\d.]+)d, (-?[\d.]+)d, (-?[\d.]+)d\]", line)
@@ -571,9 +595,10 @@ def main():
     parser = argparse.ArgumentParser(description="Crystal PvP fighter for NX Horizon that learns from every fight")
     parser.add_argument("--target", default="zombie")
     parser.add_argument("--time", type=float, default=75.0)
+    parser.add_argument("--opponent", default=None, help="only fight the player with this name")
     parser.add_argument("--arena-center", type=float, nargs=2, default=(1000.5, 1000.5))
     arguments = parser.parse_args()
-    CrystalFighter(arguments.target, arguments.time, tuple(arguments.arena_center)).run()
+    CrystalFighter(arguments.target, arguments.time, tuple(arguments.arena_center), arguments.opponent).run()
 
 
 if __name__ == "__main__":
